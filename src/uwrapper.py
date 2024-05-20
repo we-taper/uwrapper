@@ -16,12 +16,14 @@ WRAPPER_NAME = 'uwrapper'
 #
 class bcolors:
     # https://stackoverflow.com/questions/287871/how-do-i-print-colored-text-to-the-terminal
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNYELLOW = '\033[93m'
-    FAIL = '\033[91m'
+    # Also, colors guessed from https://gist.github.com/nazwadi/ca00352cd0d20b640efd
+    HEADER_PURPLE = '\033[95m'
+    OK_BLUE = '\033[94m'
+    OK_CYAN = '\033[96m'
+    OK_DARKCYAN = '\033[36m'
+    OK_GREEN = '\033[92m'
+    WARN_YELLOW = '\033[93m'
+    FAIL_RED = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
@@ -32,11 +34,15 @@ def _color_msg(msg, color):
 
 
 def error(msg):
-    print(_color_msg(f'[{WRAPPER_NAME} ERROR] {msg}', bcolors.WARNYELLOW), file=sys.stderr)
+    print(_color_msg(f'[{WRAPPER_NAME} ERROR] {msg}', bcolors.FAIL_RED), file=sys.stderr)
 
 
 def info(msg):
-    print(_color_msg(f'[{WRAPPER_NAME}] {msg}', bcolors.OKGREEN))
+    print(_color_msg(f'[{WRAPPER_NAME}] {msg}', bcolors.OK_GREEN))
+
+
+def warn(msg):
+    print(_color_msg(f'[{WRAPPER_NAME} WARN] {msg}', bcolors.WARN_YELLOW))
 
 
 # %% ------------------------------------------------------------------------
@@ -44,6 +50,8 @@ def info(msg):
 #
 # We store the temporary backup of ~/.unison here:
 UNISON_BACKUP_NAME = f'.unison_before_{WRAPPER_NAME}'
+LOCAL_ARC_NAME = 'archives_local'
+REMOTE_ARC_NAME = 'archives_remote'
 
 
 @dataclass
@@ -205,27 +213,36 @@ def start(profile: Profile):
                       " Check why! Quit.")
                 return -1
             profile.remote_ssh.move('~/.unison', f'~/{UNISON_BACKUP_NAME}')
-            info(f'Existing ~/.unison on {profile.remote_name} is moved to ~/{UNISON_BACKUP_NAME}')
+            if profile.remote_ssh.path_exists(f'~/{UNISON_BACKUP_NAME}') and \
+                    not profile.remote_ssh.path_exists(f'~/.unison'):
+                info(f'Existing ~/.unison on {profile.remote_name} is moved to ~/{UNISON_BACKUP_NAME}')
+            else:
+                error(f"Failed to move existing ~/.unison to ~/{UNISON_BACKUP_NAME}. "
+                      "Check why! Quit.")
+                return -1
 
     # now that the .unison cleaned, start populating it.
-    local_archive_f = profile.folder / 'local'
     today = datetime.today().strftime('%Y%m%d')
+    backup_f = profile.folder / 'archives_backup' / today
+    local_archive_f = profile.folder / LOCAL_ARC_NAME
     if local_archive_f.exists():
         # move all files under local to .unison
         info('Copying all archive files to ~/.unison')
         shutil.copytree(local_archive_f, u_folder)
-        shutil.move(local_archive_f, local_archive_f.with_name(f'local.backup.{today}'))
+        backup_f.mkdir(parents=True, exist_ok=True)
+        shutil.move(local_archive_f, backup_f / LOCAL_ARC_NAME)
     else:
         info(f'No local archive files found.')
         u_folder.mkdir()  # creates empty ~/.unison
 
     if profile.contain_remote:
-        remote_archive_f = profile.folder / 'remote'
+        remote_archive_f = profile.folder / REMOTE_ARC_NAME
         if remote_archive_f.exists():
             # move all files under remote to .unison
             info(f'Copying all remote archive files to ~/.unison on {profile.remote_name}')
             profile.remote_ssh.dir_local2remote(remote_archive_f, '~/.unison/')
-            shutil.move(remote_archive_f, remote_archive_f.with_name(f'remote.backup.{today}'))
+            backup_f.mkdir(parents=True, exist_ok=True)
+            shutil.move(remote_archive_f, backup_f / REMOTE_ARC_NAME)
         else:
             info(f'No remote archive files found.')
             profile.remote_ssh.mkdir('~/.unison/')
@@ -245,13 +262,13 @@ def restore(profile: Profile):
 
     # first copy back archives
     profile_file_in_u.unlink()  # this file is a copy, no need to keep.
-    info(f'Moving local archives back to {profile.folder}/local.')
+    info(f'Moving local archives back to {profile.folder}/{LOCAL_ARC_NAME}.')
     # everything under ~/.unison are archives now.
-    shutil.copytree(u_folder, profile.folder / 'local')
+    shutil.copytree(u_folder, profile.folder / LOCAL_ARC_NAME)
 
     if profile.contain_remote:
-        info(f"Moving remote archives back to {profile.folder}/remote.")
-        profile.remote_ssh.dir_remote2local("~/.unison/", profile.folder / 'remote')
+        info(f"Moving remote archives back to {profile.folder}/{REMOTE_ARC_NAME}.")
+        profile.remote_ssh.dir_remote2local("~/.unison/", profile.folder / REMOTE_ARC_NAME)
 
     # then destroy now-useless copies in ~/.unison
     info("Deleting ~/.unison")
@@ -259,6 +276,8 @@ def restore(profile: Profile):
     if profile.contain_remote:
         info(f"Deleting ~/.unison on {profile.remote_name}")
         profile.remote_ssh.execute(f'rm -rf ~/.unison/')
+        if profile.remote_ssh.path_exists('~/.unison'):
+            warn(f"Failed to delete ~/.unison on {profile.remote_name}. Please remove it manually!")
 
     # then restores old .unison if exists
     # u_backup_folder = Path(f'~/{UNISON_BACKUP_NAME}').expanduser()
@@ -294,14 +313,4 @@ def main():
 
 
 if __name__ == '__main__':
-    # s = RemoteSSH('Synology224')
-    # print(s.execute('echo 1').strip())
-    # print(s.remote_home)
-    # print(s.path_exists('~/.unison'))
-    # print(s.path_exists('~/.unison2'))
-    # print(s.path_exists('~/UCL Microsoft Sync HX'))
-    # s.move('~/.unison2', '~/.unison')
-    # print(s.path_exists('~/.unison2'))
-    # print(s.dir_local2remote('/Users/hchen/code/taper-misc/uwrapper/', '~/target/'))
-    # print(s.dir_remote2local('~/.unison/', '/Users/hchen/code/taper-misc/uwrapper/remoteu/'))
     sys.exit(main())

@@ -17,13 +17,19 @@ See Appendix for the full documentation.
 **Solution**
 
 We create an equivalent relation between a folder and a profile file. The profile file conforms to unison's specification, and has a `.prf` extension. The profile file exists inside the folder. Besides the profile file, the folder stores the archive files corresponding to the profile file.
-- When the wrapper starts, it creates a clean `~/.unison` folder for both local and remote (if exists). Existing folders are renamed before and will be restored after the wrapper.
-- When the wrapper starts, it populates `~/.unison` with the required profile file and archive files. When it ends, it moves those files back to the folder and clean up the temporary `~/.unison`.
+- When the wrapper starts, it creates a clean `~/.unison` folder for both local and remote (if exists). Existing folders are renamed before for backup purposes. They will NOT be restored after the wrapper, because restoring them would make the program complicated, would encourage existing behaviour, and would bring complexity in maintenance.
+- When the wrapper starts, it populates `~/.unison` with the required profile file and archive files. When it ends, it moves those files back to the folder and remove the temporary `~/.unison`.
 - The local archives are stored in the `local` sub-folder, remote ones in the `remote` sub-folder. 
 
 The wrapper checks and records the following information:
 - the localhost name, and use `UNISONLOCALHOSTNAME` if available.
 - the remote hostname, and its `UNISONLOCALHOSTNAME` if available.
+
+# TODO
+
+- Check validity of path_spec for root.
+- Deal with Windows path (local)
+- Deal with Windows remote.
 
 # Appendix
 
