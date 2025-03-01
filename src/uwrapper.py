@@ -1,4 +1,7 @@
 #! python3
+"""A wrapper around unison.
+Organised into: Basic logging, Remote utilities, Main programs
+"""
 import re
 import shutil
 import sys
@@ -50,12 +53,7 @@ def warn(msg):
 
 
 # %% ------------------------------------------------------------------------
-# %% Class and utilities
-#
-# We store the temporary backup of ~/.unison here:
-UNISON_BACKUP_NAME = f'.unison_before_{WRAPPER_NAME}'
-LOCAL_ARC_NAME = 'archives_local'
-REMOTE_ARC_NAME = 'archives_remote'
+# %% Remote utilities
 
 
 class RemoteSSH:
@@ -297,6 +295,13 @@ class RemoteSSHWindows(RemoteSSH):
             raise RuntimeError(f'Failed to remove "{self._remote_unison}" on "{self.remote_name}"')
 
 
+# %% ------------------------------------------------------------------------
+# %% Main programs
+UNISON_BACKUP_NAME = f'.unison_before_{WRAPPER_NAME}'
+LOCAL_ARC_NAME = 'archives_local'
+REMOTE_ARC_NAME = 'archives_remote'
+
+
 @dataclass
 class Root:
     path: str
@@ -307,8 +312,8 @@ class Root:
 
 @dataclass
 class Profile:
-    file: Path
-    folder: Path
+    cfg_file: Path
+    data_folder: Path
     roots: typing.Tuple[Root, Root]
     contain_remote: bool
     remote_name: typing.Optional[str]
@@ -316,9 +321,6 @@ class Profile:
     remote_ssh: typing.Optional[RemoteSSH]
 
 
-# %% ------------------------------------------------------------------------
-# %% Main programs
-#
 def read_profile(profile_file: Path) -> Profile:
     if not profile_file.name.endswith('.prf'):
         raise RuntimeError(
@@ -384,9 +386,12 @@ def read_profile(profile_file: Path) -> Profile:
         remote_name = None
         remote_shell = None
 
+    assert profile_file.name.endswith('.prf')
+    data_folder = profile_file.parent / profile_file.name[:-4]  # with extension removed
+    data_folder.mkdir(exist_ok=True)
     return Profile(
-        file=profile_file,
-        folder=profile_file.parent,
+        cfg_file=profile_file,
+        data_folder=data_folder,
         roots=(root_a, root_b),
         contain_remote=contain_remote,
         remote_name=remote_name,
@@ -431,10 +436,10 @@ def start(profile: Profile):
             )
 
     # Main program
-    backup_f = profile.folder / 'archives_backup' / datetime.today().strftime('%Y%m%d')
+    backup_f = profile.data_folder / 'archives_backup' / datetime.today().strftime('%Y%m%d')
 
     # Copy local archives to .unison
-    local_archive_f = profile.folder / LOCAL_ARC_NAME
+    local_archive_f = profile.data_folder / LOCAL_ARC_NAME
     if not local_archive_f.exists():
         info(f'No local archive files found.')
         u_folder.mkdir()  # creates empty ~/.unison
@@ -451,7 +456,7 @@ def start(profile: Profile):
 
     if profile.contain_remote:
         # Copy target archives to remote's .unison
-        remote_archive_f = profile.folder / REMOTE_ARC_NAME
+        remote_archive_f = profile.data_folder / REMOTE_ARC_NAME
         if not remote_archive_f.exists():
             info(f'No remote archive files found.')
             # Note: note need to create an empty remote unison directory here.
@@ -467,9 +472,9 @@ def start(profile: Profile):
             shutil.move(remote_archive_f, backup_f_remote_archive)
             info(f'Archives in "{remote_archive_f}" moved to "{backup_f_remote_archive}"')
 
-    shutil.copy(profile.file, u_folder / profile.file.name)
-    info(f'Profile "{profile.file}" copied to "{u_folder}"')
-    info(f"Now ready. Please run: unison {profile.file.name}")
+    shutil.copy(profile.cfg_file, u_folder / profile.cfg_file.name)
+    info(f'Profile "{profile.cfg_file}" copied to "{u_folder}"')
+    info(f"Now ready. Please run: unison {profile.cfg_file.name}")
 
 
 def restore(profile: Profile):
@@ -479,17 +484,17 @@ def restore(profile: Profile):
     else:
         error(f'Cannot found "{u_folder}" folder locally.')
         return -1
-    profile_file_in_u = u_folder / profile.file.name
+    profile_file_in_u = u_folder / profile.cfg_file.name
     if not profile_file_in_u.exists():
         error(
-            f'Profile file "{profile.file.name}" not found in "{u_folder}". Check why! Quit.'
+            f'Profile file "{profile.cfg_file.name}" not found in "{u_folder}". Check why! Quit.'
         )
         return -1
 
     # First, copy back local archives
     profile_file_in_u.unlink()  # Clear local unison cfg file, as it is a copy and clutters the unison directory.
     # everything under ~/.unison are archives now.
-    local_archive = profile.folder / LOCAL_ARC_NAME
+    local_archive = profile.data_folder / LOCAL_ARC_NAME
     shutil.move(u_folder, local_archive)
     info(f'Moved local archives back to "{local_archive}".')
     u_backup_folder = Path(f'~/{UNISON_BACKUP_NAME}').expanduser()
@@ -500,16 +505,20 @@ def restore(profile: Profile):
     if profile.contain_remote:
         # Then, copy back remote archives
         remote_ssh = profile.remote_ssh
-        remote_archive = profile.folder / REMOTE_ARC_NAME
+        remote_archive = profile.data_folder / REMOTE_ARC_NAME
         profile.remote_ssh.copy_remote_archives_back(remote_archive)
         info(f'Moved remote archives back to "{remote_archive}".')
         if remote_ssh.unison_backup_exists():
+            # Note: we move existing .unison folder before restoring backup, since
+            # on certain OS (Window!), existing .unison folder would prevent
+            # the move command next line.
+            remote_ssh.delete_remote_unison()
             remote_ssh.move_remote_backup_to_unison()
             info(
                 f'Restored "{remote_ssh.remote_backup}" to "{remote_ssh.remote_unison}"'
                 f' on the remote "{remote_ssh.remote_name}"')
         else:
-            profile.remote_ssh.delete_remote_unison()
+            remote_ssh.delete_remote_unison()
             info(f'Deleted "{remote_ssh.remote_unison}" on "{profile.remote_name}"')
 
 
@@ -528,7 +537,6 @@ def main():
     except RuntimeError as e:
         error(f"Invalid profile file: {profile_file}. Error: {e}")
         return -1
-    return -1
 
     if option == 'start' or option == 's':
         return start(profile)
