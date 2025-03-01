@@ -5,7 +5,7 @@ import sys
 import typing
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from subprocess import check_output
 
 WRAPPER_NAME = 'uwrapper'
@@ -34,7 +34,10 @@ def _color_msg(msg, color):
 
 
 def error(msg):
-    print(_color_msg(f'[{WRAPPER_NAME} ERROR] {msg}', bcolors.FAIL_RED), file=sys.stderr)
+    print(
+        _color_msg(f'[{WRAPPER_NAME} ERROR] {msg}', bcolors.FAIL_RED),
+        file=sys.stderr
+    )
 
 
 def info(msg):
@@ -64,7 +67,9 @@ class Root:
 class RemoteSSH:
     def __init__(self, remote_name):
         self.remote_name = remote_name
-        self.remote_home = self.execute('echo $HOME').strip()
+        self.remote_home = PurePosixPath(self.execute('echo $HOME').strip())
+        self.remote_unison = self.remote_home / '.unison'
+        self.remote_backup = self.remote_home / UNISON_BACKUP_NAME
 
     def execute(self, cmd: str):
         """Note: this command surround cmd with single quotes.
@@ -72,17 +77,43 @@ class RemoteSSH:
         If an error happens, the remote error message is shown in stderr, and check_output
         throws a CalledProcessError but without the remote error message.
         """
-        return check_output(
-            f"ssh {self.remote_name} -T '{cmd}'", shell=True).decode('utf-8')
+        return check_output(f"ssh {self.remote_name} -T '{cmd}'",
+                            shell=True).decode('utf-8')
 
-    def expanduser(self, path: str):
-        """Similar to Path(path).expanduser()."""
-        if path.startswith('~'):
-            path = self.remote_home + path[1:]
-        return path
+    def unison_exists(self):
+        return self._path_exists(self.remote_unison)
 
-    def path_exists(self, path: str) -> bool:
-        path = self.expanduser(path)
+    def unison_backup_exists(self):
+        return self._path_exists(self.remote_backup)
+
+    def move_remote_unison_to_backup(self):
+        self._move(self.remote_unison, self.remote_backup)
+
+    def move_remote_backup_to_unison(self):
+        self._move(self.remote_backup, self.remote_unison)
+
+    def create_remote_unison_dir(self):
+        self._mkdir(self.remote_unison)
+
+    def copy_archive_folder_to_remote_unison(self, archive_folder: Path):
+        self._dir_local2remote(archive_folder, self.remote_unison)
+
+    def copy_remote_archives_back(self, local_archive_folder: Path):
+        self._dir_remote2local(self.remote_unison, local_archive_folder)
+        if local_archive_folder.exists() and local_archive_folder.is_dir(
+        ) and any(local_archive_folder.iterdir()):
+            return
+        else:
+            raise RuntimeError(
+                f"Failed to copy back archives inside remote's ~/.unison. Check local folder {local_archive_folder} and the remote \"{self.remote_name}\"."
+            )
+
+    def delete_remote_unison(self):
+        self.execute(f'rm -rf {self.remote_unison}')
+        if self._path_exists(self.remote_unison):
+            raise RuntimeError(f'Failed to remove "{self.remote_unison}" on remote "{self.remote_name}"')
+
+    def _path_exists(self, path: PurePosixPath) -> bool:
         ret = self.execute(f'test -e "{path}" && echo "yes" || echo "no"')
         ret = ret.strip()
         if ret == "yes":
@@ -90,42 +121,49 @@ class RemoteSSH:
         elif ret == "no":
             return False
         else:
-            raise RuntimeError(f'Unexpected output from ssh: {ret}')
+            raise RuntimeError(
+                f'When testing path existence, got unexpected output from ssh: {ret}'
+            )
 
-    def mkdir(self, path: str):
-        path = self.expanduser(path)
-        return self.execute(f'mkdir -p "{path}"')
+    def _mkdir(self, path: PurePosixPath):
+        self.execute(f'mkdir -p "{path}"')
+        if not self._path_exists(path):
+            raise RuntimeError(
+                f'Failed to create "{path}" on remote "{self.remote_name}"'
+            )
 
-    def move(self, old_path: str, new_path: str):
-        old_path = self.expanduser(old_path)
-        new_path = self.expanduser(new_path)
-        return self.execute(f'mv "{old_path}" "{new_path}"')
+    def _move(self, old_path: PurePosixPath, new_path: PurePosixPath):
+        self.execute(f'mv "{old_path}" "{new_path}"')
+        if not self._path_exists(old_path) and self._path_exists(new_path):
+            return
+        else:
+            raise RuntimeError(
+                f'Failed to move "{old_path}" to "{new_path}" on remote "{self.remote_name}"'
+            )
 
-    def dir_local2remote(self, local_path: typing.Union[str, Path], remote_path: str):
+    def _dir_local2remote(
+        self, local_path: Path, remote_path: PurePosixPath
+    ):
         # Note:
         # - we don't use rsync, since rsync requires a remote installation as well.
         # -  we add "-O" option to scp, so that we are compatible when the remote ssh does
         #    not have implement SFTP protocol.
-        if isinstance(local_path, Path):
-            local_path = str(local_path.absolute()) + '/'
-        remote_path = self.expanduser(remote_path)
-        if not local_path.endswith('/') or not remote_path.endswith('/'):
-            raise ValueError(f'Both local_path and remote_path should end with "/"')
-        return check_output(
+        check_output(
             f'scp -O -r "{local_path}" "{self.remote_name}:{remote_path}"',
             shell=True
-        ).decode('utf-8')
+        )
+        if not self._path_exists(remote_path):
+            raise RuntimeError(
+                f'Failed to copy "{local_path}" to "{remote_path}" in remote "{self.remote_name}".'
+            )
 
-    def dir_remote2local(self, remote_path: str, local_path: typing.Union[str, Path]):
-        if isinstance(local_path, Path):
-            local_path = str(local_path.absolute()) + '/'
-        remote_path = self.expanduser(remote_path)
-        if not local_path.endswith('/') or not remote_path.endswith('/'):
-            raise ValueError(f'Both local_path and remote_path should end with "/"')
-        return check_output(
+    def _dir_remote2local(
+        self, remote_path: PurePosixPath, local_path: Path
+    ):
+        check_output(
             f'scp -O -r "{self.remote_name}:{remote_path}" "{local_path}"',
             shell=True
-        ).decode('utf-8')
+        )
 
 
 @dataclass
@@ -142,15 +180,16 @@ class Profile:
 # %% ------------------------------------------------------------------------
 # %% Main programs
 #
-def read_profile(profile_file) -> Profile:
-    if not profile_file.endswith('.prf'):
-        raise RuntimeError(f'Profile file must ends with the extension .prf: {profile_file}')
-    file = Path(profile_file)
-    content = file.read_text(encoding='utf-8')
+def read_profile(profile_file: Path) -> Profile:
+    if not profile_file.name.endswith('.prf'):
+        raise RuntimeError(
+            f'Profile file did not end with the extension .prf: {profile_file}'
+        )
+    content = profile_file.read_text(encoding='utf-8')
     root_pattern = re.compile(r'^root\s*=\s*(.+)$')
     assert not root_pattern.match('root=')
-    assert root_pattern.match('root=asdf').groups() == ('asdf',)
-    assert root_pattern.match('root  =  asdf').groups() == ('asdf',)
+    assert root_pattern.match('root=asdf').groups() == ('asdf', )
+    assert root_pattern.match('root  =  asdf').groups() == ('asdf', )
 
     roots = []
     for line in content.split('\n'):
@@ -178,6 +217,7 @@ def read_profile(profile_file) -> Profile:
         remote_root = root_a if not root_a.is_local else root_b
         remote_name = remote_root.remote_name
         assert remote_name is not None
+        # TODO(HX): check if remote is linux
         remote_shell = RemoteSSH(remote_name)
     else:
         remote_root = None
@@ -185,110 +225,129 @@ def read_profile(profile_file) -> Profile:
         remote_shell = None
 
     return Profile(
-        file=file, folder=file.parent,
-        roots=(root_a, root_b), contain_remote=contain_remote,
+        file=profile_file,
+        folder=profile_file.parent,
+        roots=(root_a, root_b),
+        contain_remote=contain_remote,
         remote_name=remote_name,
-        remote_root=remote_root, remote_ssh=remote_shell
+        remote_root=remote_root,
+        remote_ssh=remote_shell
     )
 
 
 def start(profile: Profile):
-    # check for local .unison
+    # Check for local .unison, rename to a backup if exists.
     u_folder = Path('~/.unison').expanduser()
     if u_folder.exists():
         u_backup_folder = Path(f'~/{UNISON_BACKUP_NAME}').expanduser()
         if u_backup_folder.exists():
-            error(f'Found existing backup folder {u_backup_folder} while ~/.unison exists!'
-                  '\nCheck why! Quit.')
+            error(
+                f'Found existing backup folder "{u_backup_folder}" while "{u_folder}" exists!'
+                '\nThis is unexpected. Check why! Quit.'
+            )
             return -1
         shutil.move(u_folder, u_backup_folder)
-        info(f'Existing ~/.unison is moved to ~/{UNISON_BACKUP_NAME}')
+        info(f'Existing "{u_folder}" is moved to "{u_backup_folder}"')
 
-    # check for remote .unison
     if profile.contain_remote:
-        if profile.remote_ssh.path_exists('~/.unison'):
-            if profile.remote_ssh.path_exists(f'~/{UNISON_BACKUP_NAME}'):
-                error(f"On {profile.remote_name}, found existing remote backup "
-                      f"folder ~/{UNISON_BACKUP_NAME} while ~/.unison exists!"
-                      " Check why! Quit.")
+        # Check for remote folder status.
+        # If both unison and the backup exists: unexpected and quit.
+        # If both are missing: good.
+        # If only unison folder: move to backup. If only the backup: good.
+        remote_ssh = profile.remote_ssh
+        if remote_ssh.unison_exists():
+            if remote_ssh.unison_backup_exists():
+                error(
+                    f'On "{profile.remote_name}", found existing remote backup '
+                    f'folder "{remote_ssh.remote_backup}" while "{remote_ssh.remote_unison}" exists!'
+                    "\nThis is unexpected. Check why! Quit."
+                )
                 return -1
-            profile.remote_ssh.move('~/.unison', f'~/{UNISON_BACKUP_NAME}')
-            if profile.remote_ssh.path_exists(f'~/{UNISON_BACKUP_NAME}') and \
-                    not profile.remote_ssh.path_exists(f'~/.unison'):
-                info(f'Existing ~/.unison on {profile.remote_name} is moved to ~/{UNISON_BACKUP_NAME}')
-            else:
-                error(f"Failed to move existing ~/.unison to ~/{UNISON_BACKUP_NAME}. "
-                      "Check why! Quit.")
-                return -1
+            # else (not unison_backup_exists):
+            remote_ssh.move_remote_unison_to_backup()
+            info(
+                f'Existing "{remote_ssh.remote_unison}" on "{profile.remote_name}" is moved to "{remote_ssh.remote_backup}"'
+            )
 
-    # now that the .unison cleaned, start populating it.
-    today = datetime.today().strftime('%Y%m%d')
-    backup_f = profile.folder / 'archives_backup' / today
+    # Main program
+    backup_f = profile.folder / 'archives_backup' / datetime.today().strftime('%Y%m%d')
+
+    # Copy local archives to .unison
     local_archive_f = profile.folder / LOCAL_ARC_NAME
-    if local_archive_f.exists():
-        # move all files under local to .unison
-        info('Copying all archive files to ~/.unison')
-        shutil.copytree(local_archive_f, u_folder)
-        backup_f.mkdir(parents=True, exist_ok=True)
-        shutil.move(local_archive_f, backup_f / LOCAL_ARC_NAME)
-    else:
+    if not local_archive_f.exists():
         info(f'No local archive files found.')
         u_folder.mkdir()  # creates empty ~/.unison
+    else:
+        # move all files under local to .unison
+        shutil.copytree(local_archive_f, u_folder)
+        info(f'Archives in "{local_archive_f}" copied to "{u_folder}"')
+        backup_f.mkdir(parents=True, exist_ok=True)
+        backup_f_local_archive = backup_f / LOCAL_ARC_NAME
+        if backup_f_local_archive.exists():
+            shutil.rmtree(backup_f_local_archive)
+        shutil.move(local_archive_f, backup_f_local_archive)
+        info(f'Archives in "{local_archive_f}" moved to "{backup_f_local_archive}"')
 
     if profile.contain_remote:
+        # Copy target archives to remote's .unison
         remote_archive_f = profile.folder / REMOTE_ARC_NAME
-        if remote_archive_f.exists():
-            # move all files under remote to .unison
-            info(f'Copying all remote archive files to ~/.unison on {profile.remote_name}')
-            profile.remote_ssh.dir_local2remote(remote_archive_f, '~/.unison/')
-            backup_f.mkdir(parents=True, exist_ok=True)
-            shutil.move(remote_archive_f, backup_f / REMOTE_ARC_NAME)
-        else:
+        if not remote_archive_f.exists():
             info(f'No remote archive files found.')
-            profile.remote_ssh.mkdir('~/.unison/')
+            # Note: note need to create an empty remote unison directory here.
+        else:
+            # move all files under remote to .unison
+            remote_ssh = profile.remote_ssh
+            remote_ssh.copy_archive_folder_to_remote_unison(remote_archive_f)
+            info(f'Remote archive files copied to "{remote_ssh.remote_unison}" on "{profile.remote_name}"')
+            backup_f.mkdir(parents=True, exist_ok=True)
+            backup_f_remote_archive = backup_f / REMOTE_ARC_NAME
+            if backup_f_remote_archive.exists():
+                shutil.rmtree(backup_f_remote_archive)
+            shutil.move(remote_archive_f, backup_f_remote_archive)
+            info(f'Archives in "{remote_archive_f}" moved to "{backup_f_remote_archive}"')
 
-    info("Copying profile to ~/.unison")
     shutil.copy(profile.file, u_folder / profile.file.name)
-    info(f"Now ready to run: unison {profile.file.name}")
+    info(f'Profile "{profile.file}" copied to "{u_folder}"')
+    info(f"Now ready. Please run: unison {profile.file.name}")
 
 
 def restore(profile: Profile):
     u_folder = Path('~/.unison').expanduser()
-    assert u_folder.exists() and u_folder.is_dir()
+    if u_folder.exists() and u_folder.is_dir():
+        pass
+    else:
+        error(f'Cannot found "{u_folder}" folder locally.')
+        return -1
     profile_file_in_u = u_folder / profile.file.name
     if not profile_file_in_u.exists():
-        error(f'Profile file {profile.file.name} not found in ~/.unison. Check why! Quit.')
+        error(
+            f'Profile file "{profile.file.name}" not found in "{u_folder}". Check why! Quit.'
+        )
         return -1
 
-    # first copy back archives
-    profile_file_in_u.unlink()  # this file is a copy, no need to keep.
-    info(f'Moving local archives back to {profile.folder}/{LOCAL_ARC_NAME}.')
+    # First, copy back local archives
+    profile_file_in_u.unlink()  # Clear local unison cfg file, as it is a copy and clutters the unison directory.
     # everything under ~/.unison are archives now.
-    shutil.copytree(u_folder, profile.folder / LOCAL_ARC_NAME)
+    local_archive = profile.folder / LOCAL_ARC_NAME
+    shutil.move(u_folder, local_archive)
+    info(f'Moved local archives back to "{local_archive}".')
+    u_backup_folder = Path(f'~/{UNISON_BACKUP_NAME}').expanduser()
+    if u_backup_folder.exists():
+        shutil.move(u_backup_folder, u_folder)
+        info(f'Restored local backup "{u_backup_folder}" to "{u_folder}"')
 
     if profile.contain_remote:
-        info(f"Moving remote archives back to {profile.folder}/{REMOTE_ARC_NAME}.")
-        profile.remote_ssh.dir_remote2local("~/.unison/", profile.folder / REMOTE_ARC_NAME)
-
-    # then destroy now-useless copies in ~/.unison
-    info("Deleting ~/.unison")
-    shutil.rmtree(u_folder)
-    if profile.contain_remote:
-        info(f"Deleting ~/.unison on {profile.remote_name}")
-        profile.remote_ssh.execute(f'rm -rf ~/.unison/')
-        if profile.remote_ssh.path_exists('~/.unison'):
-            warn(f"Failed to delete ~/.unison on {profile.remote_name}. Please remove it manually!")
-
-    # then restores old .unison if exists
-    # u_backup_folder = Path(f'~/{UNISON_BACKUP_NAME}').expanduser()
-    # if u_backup_folder.exists():
-    #     info(f"Restoring ~/.unison from ~/{u_backup_folder}")
-    #     shutil.move(u_backup_folder, u_folder)
-    # if profile.contain_remote:
-    #     r_backup = '~/' + UNISON_BACKUP_NAME
-    #     if profile.remote_ssh.path_exists(r_backup):
-    #         info(f"Restoring ~/.unison from {r_backup} on {profile.remote_name}")
-    #         profile.remote_ssh.move(r_backup, '~/.unison/')
+        # Then, copy back remote archives
+        remote_ssh = profile.remote_ssh
+        remote_archive = profile.folder / REMOTE_ARC_NAME
+        profile.remote_ssh.copy_remote_archives_back(remote_archive)
+        info(f'Moved remote archives back to "{remote_archive}".')
+        if remote_ssh.unison_backup_exists():
+            remote_ssh.move_remote_backup_to_unison()
+            info(f'Restored "{remote_ssh.remote_backup}" to "{remote_ssh.remote_unison}" on the remote "{remote_ssh.remote_name}"')
+        else:
+            profile.remote_ssh.delete_remote_unison()
+            info(f'Deleted "{remote_ssh.remote_unison}" on "{profile.remote_name}"')
 
 
 def main():
@@ -297,7 +356,9 @@ def main():
         return -1
     option = sys.argv[1]
     profile_file = sys.argv[2]
+    profile_file = Path(profile_file).absolute()
     try:
+        info(f'Reading file: {profile_file}')
         profile = read_profile(profile_file)
         info(f'Found Root: {profile.roots[0]}')
         info(f'Found Root: {profile.roots[1]}')
