@@ -446,13 +446,13 @@ def start(profile: Profile):
     else:
         # move all files under local to .unison
         shutil.copytree(local_archive_f, u_folder)
-        info(f'Archives in "{local_archive_f}" copied to "{u_folder}"')
+        info(f'Copied archives in "{local_archive_f}" to "{u_folder}"')
         backup_f.mkdir(parents=True, exist_ok=True)
         backup_f_local_archive = backup_f / LOCAL_ARC_NAME
         if backup_f_local_archive.exists():
             shutil.rmtree(backup_f_local_archive)
         shutil.move(local_archive_f, backup_f_local_archive)
-        info(f'Archives in "{local_archive_f}" moved to "{backup_f_local_archive}"')
+        info(f'Moved archives in "{local_archive_f}" to "{backup_f_local_archive}" (backup)')
 
     if profile.contain_remote:
         # Copy target archives to remote's .unison
@@ -464,17 +464,18 @@ def start(profile: Profile):
             # move all files under remote to .unison
             remote_ssh = profile.remote_ssh
             remote_ssh.copy_archive_folder_to_remote_unison(remote_archive_f)
-            info(f'Remote archive files copied to "{remote_ssh.remote_unison}" on "{profile.remote_name}"')
+            info(f'Copied remote archive in "{remote_archive_f}" to'
+                 f' "{remote_ssh.remote_unison}" on "{profile.remote_name}"')
             backup_f.mkdir(parents=True, exist_ok=True)
             backup_f_remote_archive = backup_f / REMOTE_ARC_NAME
             if backup_f_remote_archive.exists():
                 shutil.rmtree(backup_f_remote_archive)
             shutil.move(remote_archive_f, backup_f_remote_archive)
-            info(f'Archives in "{remote_archive_f}" moved to "{backup_f_remote_archive}"')
+            info(f'Moved archives in "{remote_archive_f}" to "{backup_f_remote_archive}" (backup)')
 
     shutil.copy(profile.cfg_file, u_folder / profile.cfg_file.name)
-    info(f'Profile "{profile.cfg_file}" copied to "{u_folder}"')
-    info(f"Now ready. Please run: unison {profile.cfg_file.name}")
+    info(f'Copied profile "{profile.cfg_file}" to "{u_folder}"')
+    info(f"DONE. Please run: unison {profile.cfg_file.name}")
 
 
 def restore(profile: Profile):
@@ -516,7 +517,7 @@ def restore(profile: Profile):
             remote_ssh.move_remote_backup_to_unison()
             info(
                 f'Restored "{remote_ssh.remote_backup}" to "{remote_ssh.remote_unison}"'
-                f' on the remote "{remote_ssh.remote_name}"')
+                f' on the remote "{profile.remote_name}"')
         else:
             remote_ssh.delete_remote_unison()
             info(f'Deleted "{remote_ssh.remote_unison}" on "{profile.remote_name}"')
