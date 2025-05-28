@@ -1,39 +1,59 @@
 # Unison Wrapper
 
-Aims to manage the archive files created by Unison.
+**WORK IN PROGRESS**: this is a toy project provided without any guarantee.
 
-**Problem.**
+# The Problem
+
+This project aims to deal with the headache created by the uncontrolled growth of cache files, as raised by one user:
+
+> In ~/.unison, files starting with ar and fp accumulate as one changes roots over the years. It's natural to want to delete ones that are unused, but it's somewhat difficult to understand what each file is for.
+
+(See [Issue 495](https://github.com/bcpierce00/unison/issues/495).)
+
+This project provides a temporary solution by providing a wrapper, called `uwrapper`, which manually reads the configuration file, manages the corresponding archive files in a dedicated directory. To achieve this for remote hosts, the wrapper also upload or download the files accordingly.
+
+# Solution
+
+**Problem**
 
 Unison use archive files to store information about a synchronisation. These files exist on both roots. Using for a long time creates a significant amount of archive files, resulting in confusion and a cluttered `~/.unison` folder.
 
 **Archive files**
 
-Brief note: Assume there are two roots: A and B, there will be two archive files for A, located on A's machine's `~/.unison` folder, and named `arX` and `fpX`, where `X` is a 32 length 32 alphanumeric in lower case. Similarly, for `B`, we have two archive files located similarly.
+Assume there are two roots: A and B, there will be two archive files for A, located on A's machine's `~/.unison` folder, and named `arX` and `fpX`, where `X` is a 32 length 32 alphanumeric in lower case. Similarly, for `B`, we have two archive files located similarly.
 
-The names of roots are canonized, and used to compute name of the archive files, i.e., the `X` above. Note that the name of a root contains both a hostname and the full path. On both the local machine and the remote, the hostname is first determined by the environment variable `UNISONLOCALHOSTNAME`
-
-See Appendix for the full documentation.
+The names of roots are canonized, and used to compute name of the archive files, i.e., the `X` above. Note that the name of a root contains both a hostname and the full path. On both the local machine and the remote, the hostname is first determined by the environment variable `UNISONLOCALHOSTNAME`. If the environment variable is missing, it is then determined by a standard procedure. See [Appendix](#appendix) for details.
 
 **Solution**
 
-We create an equivalent relation between a folder and a profile file. The profile file conforms to unison's specification, and has a `.prf` extension. The profile file exists inside the folder. Besides the profile file, the folder stores the archive files corresponding to the profile file.
-- When the wrapper starts, it creates a clean `~/.unison` folder for both local and remote (if exists). Existing folders are renamed before for backup purposes. They will NOT be restored after the wrapper, because restoring them would make the program complicated, would encourage existing behaviour, and would bring complexity in maintenance.
+For each profile file, the wrapper creates a folder with the same prefix (i.e. without the `.prf` extension). This folder stores the archive files corresponding to the profile file.
+- When the wrapper starts, it creates a clean `~/.unison` folder for both local host and remote host (if exists). Existing folders are renamed before for backup purposes. They will NOT be restored after the wrapper, because restoring them would encourage using pre-existing archives and would bring complexity in maintaining this wrapper.
 - When the wrapper starts, it populates `~/.unison` with the required profile file and archive files. When it ends, it moves those files back to the folder and remove the temporary `~/.unison`.
 - The local archives are stored in the `local` sub-folder, remote ones in the `remote` sub-folder. 
 
-The wrapper checks and records the following information:
-- the localhost name, and use `UNISONLOCALHOSTNAME` if available.
-- the remote hostname, and its `UNISONLOCALHOSTNAME` if available.
+# Usage and Limitations
+
+Currently, this wrapper is developed with a MacOS local host, and can support a Linux host in principle. It has been tested against a Linux remote as well as a Windows remote. Additionally, the communication with remote is implemented through simple calls to `ssh` commands and executing standard shell/powershell scripts on the remote platform, which can be problematic if not supported remotely.
+
+Please first clone this package, and install it locally:
+- Install: `pipx install ./`. 
+- Upgrade: `pipx upgrade unison-wrapper`.
+
+To use this package:
+- To start preparing for a profile: `uwrapper start profile_name.prf`.
+- After this, one can execute unison as normal: `unison profile_name.prf`.
+- Once the synchronisation is finished, it is important to restore the state so that the updated archive files are properly copied back: `unison restore profile_name.prf`.
 
 # TODO
 
-- Check validity of path_spec for root.
-- Deal with Windows path (local)
-- Deal with Windows remote.
+- [ ] Use a file to record the state so that we don't need to specify "start/restore".
+- [ ] Keep a record of `UNISONLOCALHOSTNAME`.
+- [ ] Extend to work on Windows machine (local host is Windows).
+- [ ] Test it on Linux host.
 
 # Appendix
 
-**Archive files (from Unison doc)**
+From Unison's documentation:
 
 ```text
 The name of the archive file on each replica is calculated from
@@ -74,7 +94,3 @@ rootalias = //new-hostname//new-path -> //old-hostname/old-path
 Note that root aliases are case-sensitive, even on case-insensitive
 file systems.
 ```
-
-**Install this package locally**
-
-Install: `pipx install ./`. Upgrade: `pipx upgrade unison-wrapper`.

@@ -539,9 +539,9 @@ def main():
         error(f"Invalid profile file: {profile_file}. Error: {e}")
         return -1
 
-    if option == 'start' or option == 's':
+    if option == 'start':
         return start(profile)
-    if option == 'restore' or option == 'r':
+    if option == 'restore':
         return restore(profile)
     error(f'Invalid option: {option}')
     return -1
