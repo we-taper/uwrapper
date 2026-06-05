@@ -2,6 +2,7 @@
 """A wrapper around unison.
 Organised into: Basic logging, Remote utilities, Main programs
 """
+import argparse
 import re
 import shutil
 import sys
@@ -199,7 +200,7 @@ class RemoteSSHUnix(RemoteSSH):
             )
 
     def delete_remote_unison(self):
-        self.execute(f'rm -rf {self.remote_unison}')
+        self.execute(f'rm -rf "{self.remote_unison}"')
         if self._path_exists(self._remote_unison):
             raise RuntimeError(f'Failed to remove "{self.remote_unison}" on remote "{self.remote_name}"')
 
@@ -275,18 +276,29 @@ class RemoteSSHWindows(RemoteSSH):
         self._mkdir(self._remote_unison)
 
     def copy_archive_folder_to_remote_unison(self, archive_folder: Path):
-        return check_output(
+        output = check_output(
             f'scp -r "{archive_folder}" "{self.remote_name}:{self._remote_unison}"',
             shell=True
         ).decode('utf-8')
+        if not self._path_exists(self._remote_unison):
+            raise RuntimeError(
+                f'Failed to copy "{archive_folder}" to "{self._remote_unison}" on "{self.remote_name}"'
+            )
+        return output
 
     def copy_remote_archives_back(self, archive_folder: Path):
         # test shows that \ -> / substitution is necessary, otherwise scp reports "No such file or directory"
         remote_path = str(self._remote_unison).replace('\\', '/')
-        return check_output(
+        output = check_output(
             f'scp -r "{self.remote_name}:{remote_path}" "{archive_folder}"',
             shell=True
         ).decode('utf-8')
+        if archive_folder.exists() and archive_folder.is_dir():
+            return output
+        raise RuntimeError(
+            f'Failed to copy back archives inside remote\'s "~/.unison".'
+            f' Check local folder {archive_folder} and the remote "{self.remote_name}".'
+        )
 
     def delete_remote_unison(self):
         # -Recurse for folders
@@ -322,25 +334,40 @@ class Profile:
 
 
 def read_profile(profile_file: Path) -> Profile:
+    if not profile_file.exists():
+        raise RuntimeError(f'Profile file does not exist: {profile_file}')
+    if not profile_file.is_file():
+        raise RuntimeError(f'Profile path is not a file: {profile_file}')
     if not profile_file.name.endswith('.prf'):
         raise RuntimeError(
             f'Profile file did not end with the extension .prf: {profile_file}'
         )
     content = profile_file.read_text(encoding='utf-8')
-    root_pattern = re.compile(r'^root\s*=\s*(.+)$')
+    root_pattern = re.compile(r'^\s*root\s*=\s*(.+?)\s*$')
     assert not root_pattern.match('root=')
     assert root_pattern.match('root=asdf').groups() == ('asdf',)
     assert root_pattern.match('root  =  asdf').groups() == ('asdf',)
+    assert root_pattern.match('  root  =  asdf  ').groups() == ('asdf',)
 
     def parse_root_path(path: str):
+        path = path.strip()
+        if not path:
+            raise ValueError('Empty root path.')
         parsed = urlparse(path)
         if parsed.scheme == '':
             return Root(path, True)
         if parsed.scheme == 'ssh':
             name = parsed.netloc
+            if not name:
+                raise ValueError(f'Missing remote name in root: {path}')
             if parsed.path.startswith('//'):
                 return Root(parsed.path[1:], False, name, 'Unix')
-            if parsed.path[0] == '/' and parsed.path[1].isalpha() and parsed.path[2] == ':':
+            if (
+                    len(parsed.path) >= 3
+                    and parsed.path[0] == '/'
+                    and parsed.path[1].isalpha()
+                    and parsed.path[2] == ':'
+            ):
                 return Root(parsed.path[1:], False, name, 'Windows')
         raise ValueError(f"Failed to understand this root: {path}")
 
@@ -401,6 +428,16 @@ def read_profile(profile_file: Path) -> Profile:
 
 
 def start(profile: Profile):
+    local_archive_f = profile.data_folder / LOCAL_ARC_NAME
+    if local_archive_f.exists() and not local_archive_f.is_dir():
+        error(f'Local archive path exists but is not a directory: "{local_archive_f}"')
+        return -1
+
+    remote_archive_f = profile.data_folder / REMOTE_ARC_NAME
+    if profile.contain_remote and remote_archive_f.exists() and not remote_archive_f.is_dir():
+        error(f'Remote archive path exists but is not a directory: "{remote_archive_f}"')
+        return -1
+
     # Check for local .unison, rename to a backup if exists.
     u_folder = Path('~/.unison').expanduser()
     if u_folder.exists():
@@ -439,7 +476,6 @@ def start(profile: Profile):
     backup_f = profile.data_folder / 'archives_backup' / datetime.today().strftime('%Y%m%d')
 
     # Copy local archives to .unison
-    local_archive_f = profile.data_folder / LOCAL_ARC_NAME
     if not local_archive_f.exists():
         info(f'No local archive files found.')
         u_folder.mkdir()  # creates empty ~/.unison
@@ -456,7 +492,6 @@ def start(profile: Profile):
 
     if profile.contain_remote:
         # Copy target archives to remote's .unison
-        remote_archive_f = profile.data_folder / REMOTE_ARC_NAME
         if not remote_archive_f.exists():
             info(f'No remote archive files found.')
             # Note: note need to create an empty remote unison directory here.
@@ -492,10 +527,24 @@ def restore(profile: Profile):
         )
         return -1
 
+    local_archive = profile.data_folder / LOCAL_ARC_NAME
+    if local_archive.exists():
+        error(
+            f'Cannot move local archives back because "{local_archive}" already exists.'
+            ' Check whether a previous restore partially completed.'
+        )
+        return -1
+    remote_archive = profile.data_folder / REMOTE_ARC_NAME
+    if profile.contain_remote and remote_archive.exists():
+        error(
+            f'Cannot copy remote archives back because "{remote_archive}" already exists.'
+            ' Check whether a previous restore partially completed.'
+        )
+        return -1
+
     # First, copy back local archives
     profile_file_in_u.unlink()  # Clear local unison cfg file, as it is a copy and clutters the unison directory.
     # everything under ~/.unison are archives now.
-    local_archive = profile.data_folder / LOCAL_ARC_NAME
     shutil.move(u_folder, local_archive)
     info(f'Moved local archives back to "{local_archive}".')
     u_backup_folder = Path(f'~/{UNISON_BACKUP_NAME}').expanduser()
@@ -506,7 +555,6 @@ def restore(profile: Profile):
     if profile.contain_remote:
         # Then, copy back remote archives
         remote_ssh = profile.remote_ssh
-        remote_archive = profile.data_folder / REMOTE_ARC_NAME
         profile.remote_ssh.copy_remote_archives_back(remote_archive)
         info(f'Moved remote archives back to "{remote_archive}".')
         if remote_ssh.unison_backup_exists():
@@ -524,27 +572,37 @@ def restore(profile: Profile):
 
 
 def main():
-    if len(sys.argv) != 3:
-        error(f'Usage: {sys.argv[0]} [start or s|restore or r] <profile_file>')
-        return -1
-    option = sys.argv[1]
-    profile_file = sys.argv[2]
-    profile_file = Path(profile_file).absolute()
+    parser = argparse.ArgumentParser(
+        prog=WRAPPER_NAME,
+        description="Prepare and restore profile-specific Unison archive folders.",
+    )
+    parser.add_argument(
+        'command',
+        choices=('start', 's', 'restore', 'r'),
+        help='start/s prepares archives; restore/r saves archives back',
+    )
+    parser.add_argument(
+        'profile_file',
+        type=Path,
+        help='Unison profile file (.prf)',
+    )
+    args = parser.parse_args()
+
+    profile_file = args.profile_file.absolute()
     try:
         info(f'Reading file: {profile_file}')
         profile = read_profile(profile_file)
         info(f'Found Root: {profile.roots[0]}')
         info(f'Found Root: {profile.roots[1]}')
-    except RuntimeError as e:
+    except (RuntimeError, ValueError, OSError) as e:
         error(f"Invalid profile file: {profile_file}. Error: {e}")
         return -1
 
-    if option == 'start':
+    if args.command in ('start', 's'):
         return start(profile)
-    if option == 'restore':
+    if args.command in ('restore', 'r'):
         return restore(profile)
-    error(f'Invalid option: {option}')
-    return -1
+    raise RuntimeError(f'Unhandled command: {args.command}')
 
 
 if __name__ == '__main__':
